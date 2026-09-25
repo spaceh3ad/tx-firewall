@@ -1,0 +1,25 @@
+services:
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    entrypoint:
+      ["anvil", "--host", "0.0.0.0", "--chain-id", "${CHAIN_ID:-31337}"]
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://localhost:8545"]
+      # Poll fast while starting up, then rarely (each check shows up in Anvil's logs)
+      start_period: 15s
+      start_interval: 1s
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  firewall:
+    build: .
+    environment:
+      UPSTREAM_URL: ${UPSTREAM_URL:-http://anvil:8545}
+      LISTEN_ADDR: ":8546"
+    ports:
+      - "${FIREWALL_PORT:-8546}:8546"
+    depends_on:
+      # Start the firewall only once Anvil is responding
+      anvil:
+        condition: service_healthy
