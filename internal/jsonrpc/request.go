@@ -48,6 +48,8 @@ func ParseRequests(body []byte) ([]Request, error) {
 const (
 	CodeParseError    = -32700
 	CodeInvalidParams = -32602
+	// CodeTxRejected is the EIP-1474 code for "transaction rejected".
+	CodeTxRejected = -32003
 )
 
 // WriteError sends a JSON-RPC error response. A nil id is encoded as null,
