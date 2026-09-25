@@ -51,9 +51,9 @@ func TestLoadListChecker(t *testing.T) {
 	path := writeList(t, strings.Join([]string{
 		"# OFAC list",
 		"",
-		strings.ToLower(alice.Hex()),                         // all lowercase
+		strings.ToLower(alice.Hex()), // all lowercase
 		"  " + strings.ToUpper(bob.Hex()[2:]) + "  # inline", // uppercase, no 0x, padded
-		carol.Hex() + "\r",                                   // Windows line ending
+		carol.Hex() + "\r", // Windows line ending
 	}, "\n"))
 
 	c, err := LoadListChecker(path)
