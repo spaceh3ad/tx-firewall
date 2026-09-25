@@ -34,9 +34,9 @@ func NewHandler(upstream *url.URL, logger *slog.Logger) http.Handler {
 
 		for _, req := range reqs {
 			if req.Method != "eth_sendRawTransaction" {
-				log.Debug("rpc passthrough", "method", req.Method)
 				continue
 			}
+			log.Debug("rpc passthrough", "method", req.Method)
 
 		}
 
