@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/spaceh3ad/tx-firewall/internal/logging"
 	"github.com/spaceh3ad/tx-firewall/internal/proxy"
 	"github.com/spaceh3ad/tx-firewall/internal/risk"
 	"github.com/spaceh3ad/tx-firewall/internal/rules"
 	"github.com/spaceh3ad/tx-firewall/internal/sanctions"
 	"github.com/spaceh3ad/tx-firewall/internal/screen"
+	"github.com/spaceh3ad/tx-firewall/internal/simulate"
 )
 
 func main() {
@@ -44,10 +46,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	sim, err := newSimulator(upstreamURL)
+	if err != nil {
+		log.Error("cannot simulate transactions on the upstream node", "err", err)
+		os.Exit(1)
+	}
+
 	screener, err := newScreener(screenerConfig{
 		sanctionsFile: sanctionsFile,
 		oracleRPC:     os.Getenv("SANCTIONS_ORACLE_RPC"),
 		threshold:     threshold,
+		simulator:     sim,
 	}, log)
 	if err != nil {
 		log.Error("cannot build screening pipeline", "err", err)
@@ -78,10 +87,35 @@ const (
 	oracleCacheSize     = 100_000
 )
 
+// Simulation runs debug_traceCall on the upstream node for every transaction.
+const (
+	simulateVerifyTimeout = 10 * time.Second
+	simulateTimeout       = 5 * time.Second
+)
+
 type screenerConfig struct {
 	sanctionsFile string
 	oracleRPC     string // empty disables the Chainalysis oracle
 	threshold     int
+	simulator     simulate.Simulator
+}
+
+// newSimulator connects to the upstream node and checks it supports
+// debug_traceCall, so a node without the debug API fails at startup.
+func newSimulator(rpcURL string) (*simulate.RPCSimulator, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), simulateVerifyTimeout)
+	defer cancel()
+
+	client, err := rpc.DialContext(ctx, rpcURL)
+	if err != nil {
+		return nil, err
+	}
+	sim := simulate.NewRPCSimulator(client, simulateTimeout)
+	if err := sim.Verify(ctx); err != nil {
+		client.Close()
+		return nil, err
+	}
+	return sim, nil
 }
 
 // newScreener wires the screening pipeline: sanctions checkers -> rules -> risk engine.
@@ -109,7 +143,7 @@ func newScreener(cfg screenerConfig, log *slog.Logger) (*screen.Screener, error)
 	if err != nil {
 		return nil, err
 	}
-	return screen.New(engine), nil
+	return screen.New(cfg.simulator, engine), nil
 }
 
 // newOracle connects to rpcURL and checks the oracle contract exists there,

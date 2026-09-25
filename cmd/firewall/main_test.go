@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/spaceh3ad/tx-firewall/internal/screen"
+	"github.com/spaceh3ad/tx-firewall/internal/simulate"
 	"github.com/spaceh3ad/tx-firewall/internal/txdecode"
 )
 
@@ -24,6 +26,46 @@ var (
 	listed       = common.HexToAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")
 	oracleListed = common.HexToAddress("0x90F79bf6EB2c4f870365E785982E1f101E93b906")
 )
+
+// plainSimulator traces every transaction as a simple call with no events.
+type plainSimulator struct{}
+
+func (plainSimulator) Simulate(_ context.Context, tx *txdecode.Decoded) (*simulate.CallFrame, error) {
+	return &simulate.CallFrame{Type: "CALL", From: tx.From, To: tx.Tx.To()}, nil
+}
+
+// fakeTraceNode is a JSON-RPC server answering debug_traceCall with result, or
+// with a "method not found" error when result is empty.
+func fakeTraceNode(t *testing.T, result string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		if result == "" {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(req.ID) + `,"error":{"code":-32601,"message":"the method debug_traceCall does not exist"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(req.ID) + `,"result":` + result + `}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestNewSimulator(t *testing.T) {
+	trace := `{"type":"CALL","from":"0x0000000000000000000000000000000000000000","to":"0x0000000000000000000000000000000000000000","gas":"0x0","gasUsed":"0x0","input":"0x"}`
+	if _, err := newSimulator(fakeTraceNode(t, trace)); err != nil {
+		t.Errorf("node with debug API: unexpected error: %v", err)
+	}
+	if _, err := newSimulator(fakeTraceNode(t, "")); err == nil {
+		t.Error("node without debug API: expected an error")
+	}
+	if _, err := newSimulator(unreachableURL(t)); err == nil {
+		t.Error("unreachable node: expected an error")
+	}
+}
 
 func writeFile(t *testing.T, content string) string {
 	t.Helper()
@@ -94,7 +136,11 @@ func assertBlocks(t *testing.T, s *screen.Screener, want map[common.Address]bool
 }
 
 func TestNewScreenerWithListOnly(t *testing.T) {
-	s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, "# test list\n"+listed.Hex()+"\n"), threshold: 50}, discard)
+	s, err := newScreener(screenerConfig{
+		sanctionsFile: writeFile(t, "# test list\n"+listed.Hex()+"\n"),
+		threshold:     50,
+		simulator:     plainSimulator{},
+	}, discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,6 +152,7 @@ func TestNewScreenerWithOracle(t *testing.T) {
 		sanctionsFile: writeFile(t, listed.Hex()+"\n"),
 		oracleRPC:     fakeOracleNode(t, true),
 		threshold:     50,
+		simulator:     plainSimulator{},
 	}, discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
