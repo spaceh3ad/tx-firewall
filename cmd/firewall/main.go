@@ -1,52 +1,42 @@
 package main
 
 import (
-	"bytes"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
+	"time"
+
+	"github.com/spaceh3ad/tx-firewall/internal/proxy"
 )
 
-const maxBodySize = 5 << 20
-
 func main() {
-	upstreamURL := getEnvOrExit("UPSTREAM_URL")
-	listenAddr := getEnvOrExit("LISTEN_ADDR")
+	upstreamURL := mustGetEnv("UPSTREAM_URL")
+	listenAddr := mustGetEnv("LISTEN_ADDR")
 
 	upstream, err := url.Parse(upstreamURL)
-	if err != nil {
-		slog.Error("invalid upstream URL", "err", err)
+	if err != nil || upstream.Scheme == "" || upstream.Host == "" {
+		slog.Error("UPSTREAM_URL must be a full URL like http://host:port", "url", upstreamURL)
 		os.Exit(1)
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(upstream)
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
-		if err != nil {
-			http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
-			return
-		}
-
-		slog.Info("request", "method", r.Method, "url", r.URL.String(), "body", string(body))
-
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
-		proxy.ServeHTTP(w, r)
-	})
+	// explicit timeouts protect against slowloris
+	server := &http.Server{
+		Addr:              listenAddr,
+		Handler:           proxy.NewHandler(upstream),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+	}
 
 	slog.Info("proxy listening", "addr", listenAddr, "upstream", upstreamURL)
-	if err := http.ListenAndServe(listenAddr, handler); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
 }
 
-func getEnvOrExit(key string) string {
+func mustGetEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
 		slog.Error("missing required environment variable", "key", key)
