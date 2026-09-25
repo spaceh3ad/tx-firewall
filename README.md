@@ -8,7 +8,7 @@ A JSON-RPC proxy that screens Ethereum transactions before they reach the node, 
 - [x] Docker Compose setup with a local Anvil node
 - [x] Intercept and decode `eth_sendRawTransaction`
 - [x] Risk scoring and blocking (`-32003 transaction rejected`, fail-closed)
-- [x] Sanctions screening of sender and recipient (OFAC list)
+- [x] Sanctions screening of sender and recipient (OFAC list, optional Chainalysis oracle)
 - [ ] Transaction simulation and trace-based rules
 - [ ] Sanctions screening of every address in the trace
 
@@ -35,12 +35,15 @@ Expected response: `{"jsonrpc":"2.0","id":1,"result":"0x7a69"}`
 
 ## Configuration
 
-| Variable         | Default                  | Description                                                                 |
-|------------------|--------------------------|-----------------------------------------------------------------------------|
-| `SANCTIONS_LIST` | `./config/sanctions.txt` | Host path of the sanctions list mounted into the firewall container         |
-| `RISK_THRESHOLD` | `50`                     | A transaction is blocked when the summed weights of its findings reach this |
+| Variable               | Default                  | Description                                                                 |
+|------------------------|--------------------------|-----------------------------------------------------------------------------|
+| `SANCTIONS_LIST`       | `./config/sanctions.txt` | Host path of the sanctions list mounted into the firewall container         |
+| `SANCTIONS_ORACLE_RPC` | empty (disabled)         | Mainnet RPC URL used to query the Chainalysis sanctions oracle              |
+| `RISK_THRESHOLD`       | `50`                     | A transaction is blocked when the summed weights of its findings reach this |
 
 The sanctions list has one address per line; blank lines and anything after `#` are ignored. The firewall refuses to start if the list is missing or has a malformed line. `config/sanctions.txt` is a snapshot of the [OFAC Ethereum address list](https://github.com/0xB10C/ofac-sanctioned-digital-currency-addresses); replace its addresses with the latest version of that file to refresh it.
+
+When `SANCTIONS_ORACLE_RPC` is set, addresses that pass the list are also checked against the [Chainalysis sanctions oracle](https://go.chainalysis.com/chainalysis-oracle-docs.html) (`0x40C57923924B5c5c5455c48D93317139ADDaC8fb`). The oracle is not deployed on local Anvil, so this needs a mainnet RPC. The firewall checks the contract exists at startup, and caches answers for 10 minutes. If the oracle can't be reached, the transaction is rejected rather than let through.
 
 When a transaction is blocked, or cannot be screened, the whole request (including the rest of a batch) is rejected before reaching the node:
 

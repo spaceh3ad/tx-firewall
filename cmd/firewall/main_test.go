@@ -1,17 +1,29 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/spaceh3ad/tx-firewall/internal/screen"
 	"github.com/spaceh3ad/tx-firewall/internal/txdecode"
 )
 
-var discard = slog.New(slog.DiscardHandler)
+var (
+	discard = slog.New(slog.DiscardHandler)
+
+	clean        = common.HexToAddress("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
+	listed       = common.HexToAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")
+	oracleListed = common.HexToAddress("0x90F79bf6EB2c4f870365E785982E1f101E93b906")
+)
 
 func writeFile(t *testing.T, content string) string {
 	t.Helper()
@@ -22,19 +34,58 @@ func writeFile(t *testing.T, content string) string {
 	return path
 }
 
-func TestNewScreenerBlocksListedSender(t *testing.T) {
-	sanctioned := common.HexToAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")
-	clean := common.HexToAddress("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
+// fakeOracleNode is a JSON-RPC server that plays a chain with the Chainalysis
+// oracle deployed (or not), reporting oracleListed as sanctioned.
+func fakeOracleNode(t *testing.T, deployed bool) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage   `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
-	s, err := newScreener(writeFile(t, "# test list\n"+sanctioned.Hex()+"\n"), 50, discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		var result string
+		switch req.Method {
+		case "eth_getCode":
+			result = "0x"
+			if deployed {
+				result = "0x6080"
+			}
+		case "eth_call":
+			var call struct {
+				Input hexutil.Bytes `json:"input"`
+			}
+			if err := json.Unmarshal(req.Params[0], &call); err != nil || len(call.Input) != 36 {
+				http.Error(w, "bad eth_call", http.StatusBadRequest)
+				return
+			}
+			answer := make([]byte, 32)
+			if common.BytesToAddress(call.Input[4:]) == oracleListed {
+				answer[31] = 1
+			}
+			result = hexutil.Encode(answer)
+		default:
+			http.Error(w, "unexpected method "+req.Method, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
 
-	for from, wantBlock := range map[common.Address]bool{sanctioned: true, clean: false} {
+func assertBlocks(t *testing.T, s *screen.Screener, want map[common.Address]bool) {
+	t.Helper()
+	for from, wantBlock := range want {
 		v, err := s.Screen(t.Context(), &txdecode.Decoded{Tx: types.NewTx(&types.DynamicFeeTx{}), From: from})
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("sender %s: unexpected error: %v", from, err)
 		}
 		if v.Block != wantBlock {
 			t.Errorf("sender %s: block = %v, want %v", from, v.Block, wantBlock)
@@ -42,27 +93,64 @@ func TestNewScreenerBlocksListedSender(t *testing.T) {
 	}
 }
 
-func TestNewScreenerRejectsBadConfig(t *testing.T) {
-	cases := map[string]struct {
-		file      string
-		threshold int
-	}{
-		"missing file":   {filepath.Join(t.TempDir(), "missing.txt"), 50},
-		"malformed list": {writeFile(t, "not-an-address\n"), 50},
-		"zero threshold": {writeFile(t, ""), 0},
+func TestNewScreenerWithListOnly(t *testing.T) {
+	s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, "# test list\n"+listed.Hex()+"\n"), threshold: 50}, discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	for name, tc := range cases {
+	assertBlocks(t, s, map[common.Address]bool{listed: true, clean: false, oracleListed: false})
+}
+
+func TestNewScreenerWithOracle(t *testing.T) {
+	s, err := newScreener(screenerConfig{
+		sanctionsFile: writeFile(t, listed.Hex()+"\n"),
+		oracleRPC:     fakeOracleNode(t, true),
+		threshold:     50,
+	}, discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertBlocks(t, s, map[common.Address]bool{listed: true, oracleListed: true, clean: false})
+}
+
+func TestNewScreenerRejectsBadConfig(t *testing.T) {
+	cases := map[string]screenerConfig{
+		"missing file":           {sanctionsFile: filepath.Join(t.TempDir(), "missing.txt"), threshold: 50},
+		"malformed list":         {sanctionsFile: writeFile(t, "not-an-address\n"), threshold: 50},
+		"zero threshold":         {sanctionsFile: writeFile(t, ""), threshold: 0},
+		"oracle not on chain":    {sanctionsFile: writeFile(t, ""), oracleRPC: fakeOracleNode(t, false), threshold: 50},
+		"unsupported rpc url":    {sanctionsFile: writeFile(t, ""), oracleRPC: "ftp://example.com", threshold: 50},
+		"unreachable oracle rpc": {sanctionsFile: writeFile(t, ""), oracleRPC: unreachableURL(t), threshold: 50},
+	}
+	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := newScreener(tc.file, tc.threshold, discard); err == nil {
+			if _, err := newScreener(cfg, discard); err == nil {
 				t.Error("expected an error")
 			}
 		})
 	}
 }
 
+// unreachableURL returns the URL of a server that has already shut down.
+func unreachableURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	return url
+}
+
 // The shipped list must stay loadable: a typo in it would stop the firewall from starting.
 func TestShippedSanctionsListLoads(t *testing.T) {
-	if _, err := newScreener(filepath.Join("..", "..", "config", "sanctions.txt"), 50, discard); err != nil {
+	path := filepath.Join("..", "..", "config", "sanctions.txt")
+	if _, err := newScreener(screenerConfig{sanctionsFile: path, threshold: 50}, discard); err != nil {
 		t.Fatalf("config/sanctions.txt does not load: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "0x0330070FD38Ec3bB94F58FA55D40368271E9e54A") {
+		t.Error("shipped list is missing a known OFAC entry; was it truncated?")
 	}
 }
