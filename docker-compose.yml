@@ -17,6 +17,11 @@ services:
     environment:
       UPSTREAM_URL: ${UPSTREAM_URL:-http://anvil:8545}
       LISTEN_ADDR: ":8546"
+      SANCTIONS_FILE: /etc/tx-firewall/sanctions.txt
+      RISK_THRESHOLD: ${RISK_THRESHOLD:-50}
+    volumes:
+      # Mounted read-only so the list can be updated without rebuilding the image
+      - ${SANCTIONS_LIST:-./config/sanctions.txt}:/etc/tx-firewall/sanctions.txt:ro
     ports:
       - "${FIREWALL_PORT:-8546}:8546"
     depends_on:

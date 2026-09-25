@@ -6,10 +6,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/spaceh3ad/tx-firewall/internal/logging"
 	"github.com/spaceh3ad/tx-firewall/internal/proxy"
+	"github.com/spaceh3ad/tx-firewall/internal/risk"
+	"github.com/spaceh3ad/tx-firewall/internal/rules"
+	"github.com/spaceh3ad/tx-firewall/internal/sanctions"
+	"github.com/spaceh3ad/tx-firewall/internal/screen"
 )
 
 func main() {
@@ -23,6 +28,7 @@ func main() {
 
 	upstreamURL := mustGetEnv("UPSTREAM_URL")
 	listenAddr := mustGetEnv("LISTEN_ADDR")
+	sanctionsFile := mustGetEnv("SANCTIONS_FILE")
 
 	upstream, err := url.Parse(upstreamURL)
 	if err != nil || upstream.Scheme == "" || upstream.Host == "" {
@@ -30,10 +36,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	threshold, err := strconv.Atoi(getEnv("RISK_THRESHOLD", "50"))
+	if err != nil {
+		log.Error("RISK_THRESHOLD must be an integer", "err", err)
+		os.Exit(1)
+	}
+
+	screener, err := newScreener(sanctionsFile, threshold, log)
+	if err != nil {
+		log.Error("cannot build screening pipeline", "err", err)
+		os.Exit(1)
+	}
+
 	// explicit timeouts protect against slowloris
 	server := &http.Server{
 		Addr:              listenAddr,
-		Handler:           proxy.NewHandler(upstream, logger),
+		Handler:           proxy.NewHandler(upstream, screener, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -44,6 +62,24 @@ func main() {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// newScreener wires the screening pipeline: sanctions list -> rules -> risk engine.
+func newScreener(sanctionsFile string, threshold int, log *slog.Logger) (*screen.Screener, error) {
+	list, err := sanctions.LoadListChecker(sanctionsFile)
+	if err != nil {
+		return nil, err
+	}
+	if list.Len() == 0 {
+		log.Warn("sanctions list is empty, no address will be blocked", "file", sanctionsFile)
+	}
+	log.Info("loaded sanctions list", "file", sanctionsFile, "addresses", list.Len())
+
+	engine, err := risk.NewEngine(threshold, rules.NewSanctioned(list))
+	if err != nil {
+		return nil, err
+	}
+	return screen.New(engine), nil
 }
 
 func getEnv(key, fallback string) string {
