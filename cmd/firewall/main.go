@@ -11,10 +11,11 @@ import (
 )
 
 const maxBodySize = 5 << 20
-const upstreamURL = "http://127.0.0.1:8545"
-const listenAddr = ":8546"
 
 func main() {
+	upstreamURL := getEnvOrExit("UPSTREAM_URL")
+	listenAddr := getEnvOrExit("LISTEN_ADDR")
+
 	upstream, err := url.Parse(upstreamURL)
 	if err != nil {
 		slog.Error("invalid upstream URL", "err", err)
@@ -43,4 +44,13 @@ func main() {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+func getEnvOrExit(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		slog.Error("missing required environment variable", "key", key)
+		os.Exit(1)
+	}
+	return v
 }
