@@ -9,7 +9,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/spaceh3ad/tx-firewall/internal/jsonrpc"
+	"github.com/spaceh3ad/tx-firewall/internal/txdecode"
 )
 
 // maxBodySize caps request bodies so a single client can't exhaust memory.
@@ -38,10 +40,44 @@ func NewHandler(upstream *url.URL, logger *slog.Logger) http.Handler {
 			}
 			log.Debug("rpc passthrough", "method", req.Method)
 
+			decoded, err := txdecode.DecodeRawTransaction(req.Params)
+			if err != nil {
+				slog.Warn("rejected undecodable transaction", "err", err)
+				jsonrpc.WriteError(w, req.ID, jsonrpc.CodeInvalidParams, "invalid transaction")
+				return
+			}
+			logTransaction(decoded)
+
 		}
 
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 		proxy.ServeHTTP(w, r)
 	})
+}
+
+func logTransaction(d *txdecode.Decoded) {
+	tx := d.Tx
+
+	to := "contract creation"
+	if tx.To() != nil {
+		to = tx.To().Hex()
+	}
+
+	// The first 4 bytes of calldata identify the called function (e.g. 0xa9059cbb = ERC-20 transfer).
+	selector := "none"
+	if len(tx.Data()) >= 4 {
+		selector = hexutil.Encode(tx.Data()[:4])
+	}
+
+	slog.Info("transaction",
+		"hash", tx.Hash().Hex(),
+		"type", tx.Type(),
+		"from", d.From.Hex(),
+		"to", to,
+		"value", tx.Value().String(),
+		"selector", selector,
+		"nonce", tx.Nonce(),
+		"chainId", tx.ChainId().String(),
+	)
 }
