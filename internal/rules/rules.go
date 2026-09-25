@@ -15,7 +15,16 @@ type Rule interface {
 	Evaluate(ctx context.Context, a *analysis.Analysis) ([]Finding, error)
 }
 
+// Weights of the README's risk levels. With the default threshold of 50,
+// one high-weight finding flags a transaction but takes a second signal to block.
+const (
+	WeightHigh   = 40
+	WeightMedium = 20
+)
+
 // Finding is one reason a rule considers the transaction risky.
+// A weighted rule reports at most one finding per transaction, so its weight
+// counts once however many times the pattern occurs.
 type Finding struct {
 	Rule      string
 	HardBlock bool   // blocks the transaction whatever the score
