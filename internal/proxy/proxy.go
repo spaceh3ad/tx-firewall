@@ -38,15 +38,14 @@ func NewHandler(upstream *url.URL, logger *slog.Logger) http.Handler {
 			if req.Method != "eth_sendRawTransaction" {
 				continue
 			}
-			log.Debug("rpc passthrough", "method", req.Method)
 
 			decoded, err := txdecode.DecodeRawTransaction(req.Params)
 			if err != nil {
-				slog.Warn("rejected undecodable transaction", "err", err)
+				log.Warn("rejected undecodable transaction", "err", err)
 				jsonrpc.WriteError(w, req.ID, jsonrpc.CodeInvalidParams, "invalid transaction")
 				return
 			}
-			logTransaction(decoded)
+			logTransaction(decoded, log)
 
 		}
 
@@ -56,7 +55,7 @@ func NewHandler(upstream *url.URL, logger *slog.Logger) http.Handler {
 	})
 }
 
-func logTransaction(d *txdecode.Decoded) {
+func logTransaction(d *txdecode.Decoded, log *slog.Logger) {
 	tx := d.Tx
 
 	to := "contract creation"
@@ -70,7 +69,7 @@ func logTransaction(d *txdecode.Decoded) {
 		selector = hexutil.Encode(tx.Data()[:4])
 	}
 
-	slog.Info("transaction",
+	log.Info("transaction",
 		"hash", tx.Hash().Hex(),
 		"type", tx.Type(),
 		"from", d.From.Hex(),
