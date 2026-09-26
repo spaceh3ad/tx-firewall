@@ -8,11 +8,10 @@ A JSON-RPC proxy that screens Ethereum transactions before they reach the node, 
 - [x] Docker Compose setup with a local Anvil node
 - [x] Intercept and decode `eth_sendRawTransaction`
 - [x] Risk scoring and blocking (`-32003 transaction rejected`, fail-closed)
-- [x] Sanctions screening of sender and recipient (OFAC list, optional Chainalysis oracle)
+- [x] Sanctions screening of every address in the trace (OFAC list, optional Chainalysis oracle)
 - [x] Transaction simulation (`debug_traceCall` with the call tracer)
 - [x] Privilege-change rule
 - [ ] Remaining trace-based rules (see [Rules](#rules))
-- [ ] Sanctions screening of every address in the trace
 
 ## Requirements
 - docker
@@ -65,7 +64,7 @@ A transaction the node refuses to execute (for example, the sender can't pay for
 
 | Rule                                 | What it checks                                                                                                                 | Type          | Status                      |
 |--------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|---------------|-----------------------------|
-| Sanctioned address                   | An address from the OFAC list (or the Chainalysis oracle) anywhere in the trace: sender, called contracts, Transfer recipients | Hard block    | Sender and recipient so far |
+| Sanctioned address                   | An address from the OFAC list (or the Chainalysis oracle) anywhere in the trace: sender, called contracts, Transfer recipients | Hard block    | Done                        |
 | Large outflow                        | More than X% of a contract's token balance leaves in a single transaction                                                      | High weight   | Planned                     |
 | Privilege change                     | OwnershipTransferred, Upgraded, AdminChanged, RoleGranted events                                                               | High weight   | Done                        |
 | Flash loan + outflow                 | A loan borrowed and repaid in the same transaction, combined with a large outflow elsewhere                                    | High weight   | Planned                     |
@@ -73,5 +72,7 @@ A transaction the node refuses to execute (for example, the sender can't pay for
 | NFT drainer                          | ApprovalForAll to a fresh contract or EOA                                                                                      | Medium weight | Planned                     |
 | Deploy-and-call                      | The transaction creates a contract and immediately calls it                                                                    | Medium weight | Planned                     |
 | Delegatecall to fresh code           | DELEGATECALL into a contract with no history                                                                                   | Medium weight | Planned                     |
+
+The sanctioned-address rule checks the sender, the recipient, every contract called or created by a frame that doesn't revert (including delegatecall targets), and the recipient of every ERC-20 and ERC-721 `Transfer`.
 
 Privilege-change events from contracts deployed in the same transaction are ignored: constructors emit them when setting the initial owner, implementation or roles.

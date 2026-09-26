@@ -103,6 +103,53 @@ func TestScreenUsesSimulatedEvents(t *testing.T) {
 	}
 }
 
+// A sanctioned address hidden inside the trace blocks the transaction even
+// though neither the sender nor the recipient is sanctioned.
+func TestScreenSanctionsWholeTrace(t *testing.T) {
+	router := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+	token := common.HexToAddress("0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9")
+	transfer := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
+
+	cases := map[string]*simulate.CallFrame{
+		"internal call to sanctioned address": {
+			Type: "CALL", From: alice, To: &router,
+			Calls: []simulate.CallFrame{{Type: "CALL", From: router, To: &carol}},
+		},
+		"token transfer to sanctioned address": {
+			Type: "CALL", From: alice, To: &router,
+			Calls: []simulate.CallFrame{{Type: "CALL", From: router, To: &token, Logs: []simulate.Log{{
+				Address: token,
+				Topics:  []common.Hash{transfer, common.BytesToHash(router.Bytes()), common.BytesToHash(carol.Bytes())},
+				Data:    common.BigToHash(common.Big1).Bytes(),
+			}}}},
+		},
+	}
+	for name, trace := range cases {
+		t.Run(name, func(t *testing.T) {
+			v, err := newScreener(t, &fakeSimulator{trace: trace}).Screen(t.Context(), decoded(alice, &router))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !v.Block || len(v.Findings) != 1 || !strings.Contains(v.Findings[0].Reason, carol.Hex()) {
+				t.Errorf("verdict = %+v, want a block naming %s", v, carol.Hex())
+			}
+		})
+	}
+
+	// The same call inside a reverted frame never happens, so it is not a reason to block.
+	reverted := &simulate.CallFrame{
+		Type: "CALL", From: alice, To: &router,
+		Calls: []simulate.CallFrame{{Type: "CALL", From: router, To: &carol, Error: "execution reverted"}},
+	}
+	v, err := newScreener(t, &fakeSimulator{trace: reverted}).Screen(t.Context(), decoded(alice, &router))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Block {
+		t.Errorf("blocked on a call that reverts: %+v", v)
+	}
+}
+
 func TestScreenBlocksWhatTheNodeRejects(t *testing.T) {
 	sim := &fakeSimulator{err: &simulate.NodeError{Message: "Insufficient funds for gas * price + value"}}
 	v, err := newScreener(t, sim).Screen(t.Context(), decoded(alice, &bob))
