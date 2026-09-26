@@ -14,6 +14,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/spaceh3ad/tx-firewall/internal/rules"
 	"github.com/spaceh3ad/tx-firewall/internal/screen"
 	"github.com/spaceh3ad/tx-firewall/internal/simulate"
 	"github.com/spaceh3ad/tx-firewall/internal/txdecode"
@@ -188,6 +190,43 @@ func unreachableURL(t *testing.T) string {
 }
 
 // The shipped list must stay loadable: a typo in it would stop the firewall from starting.
+// eventSimulator traces every transaction as a call to target that emits one log.
+type eventSimulator struct {
+	target common.Address
+	topics []common.Hash
+}
+
+func (s eventSimulator) Simulate(_ context.Context, tx *txdecode.Decoded) (*simulate.CallFrame, error) {
+	return &simulate.CallFrame{
+		Type: "CALL", From: tx.From, To: &s.target,
+		Logs: []simulate.Log{{Address: s.target, Topics: s.topics}},
+	}, nil
+}
+
+func TestNewScreenerFlagsPrivilegeChange(t *testing.T) {
+	vault := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+	sim := eventSimulator{target: vault, topics: []common.Hash{
+		crypto.Keccak256Hash([]byte("OwnershipTransferred(address,address)")),
+		common.BytesToHash(clean.Bytes()),
+		common.BytesToHash(listed.Bytes()),
+	}}
+	tx := &txdecode.Decoded{Tx: types.NewTx(&types.DynamicFeeTx{To: &vault}), From: clean}
+
+	for threshold, wantBlock := range map[int]bool{50: false, 40: true} {
+		s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: threshold, simulator: sim}, discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := s.Screen(t.Context(), tx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.Score != rules.WeightHigh || v.Block != wantBlock {
+			t.Errorf("threshold %d: verdict = %+v, want score %d and block %v", threshold, v, rules.WeightHigh, wantBlock)
+		}
+	}
+}
+
 func TestShippedSanctionsListLoads(t *testing.T) {
 	path := filepath.Join("..", "..", "config", "sanctions.txt")
 	if _, err := newScreener(screenerConfig{sanctionsFile: path, threshold: 50}, discard); err != nil {

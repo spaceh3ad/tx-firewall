@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -306,6 +307,23 @@ func TestBlockedTransactionInBatchRejectsWholeBatch(t *testing.T) {
 
 	if node.Calls() != 0 {
 		t.Fatal("batch with a blocked transaction was forwarded to the node")
+	}
+}
+
+func TestFlaggedTransactionIsForwardedAndLogged(t *testing.T) {
+	node := newFakeNode(t)
+	var logs bytes.Buffer
+	screener := &fakeScreener{verdict: risk.Verdict{
+		Score:    rules.WeightHigh,
+		Findings: []rules.Finding{{Rule: "privilege-change", Weight: rules.WeightHigh, Reason: "privilege change: upgraded"}},
+	}}
+	post(t, NewHandler(node.url, screener, slog.New(slog.NewTextHandler(&logs, nil))), sendTxBody(t))
+
+	if node.Calls() != 1 {
+		t.Fatal("transaction below the threshold was not forwarded")
+	}
+	if !strings.Contains(logs.String(), "flagged transaction") || !strings.Contains(logs.String(), "privilege change: upgraded") {
+		t.Errorf("flagged transaction not logged with its reason:\n%s", logs.String())
 	}
 }
 

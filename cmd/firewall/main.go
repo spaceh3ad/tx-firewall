@@ -139,7 +139,10 @@ func newScreener(cfg screenerConfig, log *slog.Logger) (*screen.Screener, error)
 		log.Warn("sanctions list is empty and the oracle is disabled, no address will be blocked")
 	}
 
-	engine, err := risk.NewEngine(cfg.threshold, rules.NewSanctioned(checker))
+	engine, err := risk.NewEngine(cfg.threshold,
+		rules.NewSanctioned(checker),
+		rules.NewPrivilegeChange(),
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -65,14 +65,18 @@ func NewHandler(upstream *url.URL, screener Screener, logger *slog.Logger) http.
 				jsonrpc.WriteError(w, req.ID, jsonrpc.CodeTxRejected, "transaction rejected: screening failed")
 				return
 			}
+			reasons := make([]string, len(verdict.Findings))
+			for i, f := range verdict.Findings {
+				reasons[i] = f.Reason
+			}
 			if verdict.Block {
-				reasons := make([]string, len(verdict.Findings))
-				for i, f := range verdict.Findings {
-					reasons[i] = f.Reason
-				}
 				log.Warn("blocked transaction", "hash", decoded.Tx.Hash().Hex(), "score", verdict.Score, "reasons", reasons)
 				jsonrpc.WriteError(w, req.ID, jsonrpc.CodeTxRejected, "transaction rejected: "+strings.Join(reasons, "; "))
 				return
+			}
+			if len(reasons) > 0 {
+				// Below the threshold: forwarded, but worth a record.
+				log.Info("flagged transaction", "hash", decoded.Tx.Hash().Hex(), "score", verdict.Score, "reasons", reasons)
 			}
 		}
 
