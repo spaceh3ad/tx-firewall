@@ -2,7 +2,6 @@ package rules
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -34,13 +33,9 @@ func (r *DelegatecallToFresh) Evaluate(ctx context.Context, a *analysis.Analysis
 		}
 		checked[f.To] = true
 
-		// Deployed by this transaction: fresh by definition, no need to ask the node.
-		fresh := a.CreatedInTx(f.To)
-		if !fresh {
-			var err error
-			if fresh, err = r.fresh.IsFreshContract(ctx, f.To); err != nil {
-				return nil, fmt.Errorf("freshness of %s: %w", f.To.Hex(), err)
-			}
+		fresh, err := isFresh(ctx, r.fresh, a, f.To)
+		if err != nil {
+			return nil, err
 		}
 		if fresh {
 			targets = append(targets, f.To.Hex())
