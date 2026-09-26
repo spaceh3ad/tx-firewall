@@ -133,6 +133,42 @@ func TestBuildCollectsTouchedAddresses(t *testing.T) {
 	}
 }
 
+func TestBuildCollectsApprovals(t *testing.T) {
+	token := common.HexToAddress("0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9")
+	nft := common.HexToAddress("0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9")
+	approval := crypto.Keccak256Hash([]byte("Approval(address,address,uint256)"))
+	approvalForAll := crypto.Keccak256Hash([]byte("ApprovalForAll(address,address,bool)"))
+
+	trace := &simulate.CallFrame{
+		Type: "CALL", From: alice, To: addrPtr(proxy),
+		Calls: []simulate.CallFrame{
+			{Type: "CALL", From: proxy, To: addrPtr(token), Logs: []simulate.Log{{
+				Address: token,
+				Topics:  []common.Hash{approval, common.BytesToHash(alice.Bytes()), common.BytesToHash(carol.Bytes())},
+				Data:    common.BigToHash(common.Big1).Bytes(),
+			}}},
+			{Type: "CALL", From: proxy, To: addrPtr(nft), Logs: []simulate.Log{{
+				Address: nft,
+				Topics:  []common.Hash{approvalForAll, common.BytesToHash(alice.Bytes()), common.BytesToHash(carol.Bytes())},
+				Data:    common.BigToHash(common.Big1).Bytes(),
+			}}},
+			{Type: "CALL", From: proxy, To: addrPtr(nft), Error: "execution reverted", Logs: []simulate.Log{{
+				Address: nft,
+				Topics:  []common.Hash{approvalForAll, common.BytesToHash(alice.Bytes()), common.BytesToHash(bob.Bytes())},
+				Data:    common.BigToHash(common.Big1).Bytes(),
+			}}},
+		},
+	}
+	a := Build(decoded(alice, &proxy), trace)
+
+	if len(a.Approvals) != 1 || a.Approvals[0].Token != token || a.Approvals[0].Spender != carol {
+		t.Errorf("approvals = %+v", a.Approvals)
+	}
+	if len(a.ApprovalsForAll) != 1 || a.ApprovalsForAll[0].Collection != nft || a.ApprovalsForAll[0].Operator != carol || !a.ApprovalsForAll[0].Approved {
+		t.Errorf("approvals for all = %+v (the reverted one must be dropped)", a.ApprovalsForAll)
+	}
+}
+
 func TestBuildFrames(t *testing.T) {
 	// root CALL
 	//   CREATE newImpl

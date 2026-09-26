@@ -30,8 +30,10 @@ type Analysis struct {
 	Created  []common.Address // contracts deployed by this transaction
 	Logs     []simulate.Log   // events that would be emitted, grouped by frame
 
-	Transfers  []events.Transfer
-	Privileged []events.PrivilegeChange
+	Transfers       []events.Transfer
+	Approvals       []events.Approval
+	ApprovalsForAll []events.ApprovalForAll
+	Privileged      []events.PrivilegeChange
 }
 
 // Frame is one call of the trace. The root frame has depth 0; a frame's
@@ -106,6 +108,12 @@ func (a *Analysis) collect(f *simulate.CallFrame, depth int) {
 		if tr, ok := events.DecodeTransfer(l.Address, l.Topics, l.Data); ok {
 			a.Transfers = append(a.Transfers, tr)
 			a.addAddress(tr.To)
+		}
+		if ap, ok := events.DecodeApproval(l.Address, l.Topics, l.Data); ok {
+			a.Approvals = append(a.Approvals, ap)
+		}
+		if ap, ok := events.DecodeApprovalForAll(l.Address, l.Topics, l.Data); ok {
+			a.ApprovalsForAll = append(a.ApprovalsForAll, ap)
 		}
 		if pc, ok := events.DecodePrivilegeChange(l.Address, l.Topics, l.Data); ok {
 			a.Privileged = append(a.Privileged, pc)
