@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/spaceh3ad/tx-firewall/internal/chainstate"
 	"github.com/spaceh3ad/tx-firewall/internal/logging"
 	"github.com/spaceh3ad/tx-firewall/internal/proxy"
 	"github.com/spaceh3ad/tx-firewall/internal/risk"
@@ -46,9 +47,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	sim, err := newSimulator(upstreamURL)
+	freshBlocks, err := strconv.ParseUint(getEnv("FRESH_CONTRACT_BLOCKS", "7200"), 10, 64)
+	if err != nil || freshBlocks == 0 {
+		log.Error("FRESH_CONTRACT_BLOCKS must be a positive integer", "value", os.Getenv("FRESH_CONTRACT_BLOCKS"))
+		os.Exit(1)
+	}
+
+	// One connection to the upstream node serves simulation and history lookups.
+	client, err := dialUpstream(upstreamURL)
+	if err != nil {
+		log.Error("cannot connect to the upstream node", "err", err)
+		os.Exit(1)
+	}
+	sim, err := newSimulator(client)
 	if err != nil {
 		log.Error("cannot simulate transactions on the upstream node", "err", err)
+		os.Exit(1)
+	}
+	freshness, err := newFreshness(client, freshBlocks)
+	if err != nil {
+		log.Error("cannot check contract age on the upstream node", "err", err)
 		os.Exit(1)
 	}
 
@@ -57,6 +75,7 @@ func main() {
 		oracleRPC:     os.Getenv("SANCTIONS_ORACLE_RPC"),
 		threshold:     threshold,
 		simulator:     sim,
+		freshness:     freshness,
 	}, log)
 	if err != nil {
 		log.Error("cannot build screening pipeline", "err", err)
@@ -87,10 +106,13 @@ const (
 	oracleCacheSize     = 100_000
 )
 
-// Simulation runs debug_traceCall on the upstream node for every transaction.
+// Upstream node usage: debug_traceCall for every transaction, and eth_getCode
+// for the age of delegatecall targets (established contracts are cached).
 const (
-	simulateVerifyTimeout = 10 * time.Second
+	upstreamVerifyTimeout = 10 * time.Second
 	simulateTimeout       = 5 * time.Second
+	freshnessTimeout      = 2 * time.Second
+	freshnessCacheSize    = 100_000
 )
 
 type screenerConfig struct {
@@ -98,24 +120,39 @@ type screenerConfig struct {
 	oracleRPC     string // empty disables the Chainalysis oracle
 	threshold     int
 	simulator     simulate.Simulator
+	freshness     chainstate.FreshnessChecker
 }
 
-// newSimulator connects to the upstream node and checks it supports
-// debug_traceCall, so a node without the debug API fails at startup.
-func newSimulator(rpcURL string) (*simulate.RPCSimulator, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), simulateVerifyTimeout)
+func dialUpstream(rpcURL string) (*rpc.Client, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamVerifyTimeout)
+	defer cancel()
+	return rpc.DialContext(ctx, rpcURL)
+}
+
+// newSimulator checks the node supports debug_traceCall, so a node without
+// the debug API fails at startup.
+func newSimulator(client *rpc.Client) (*simulate.RPCSimulator, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamVerifyTimeout)
 	defer cancel()
 
-	client, err := rpc.DialContext(ctx, rpcURL)
-	if err != nil {
-		return nil, err
-	}
 	sim := simulate.NewRPCSimulator(client, simulateTimeout)
 	if err := sim.Verify(ctx); err != nil {
-		client.Close()
 		return nil, err
 	}
 	return sim, nil
+}
+
+// newFreshness checks the node keeps state for window blocks, so a pruned node
+// with too long a window fails at startup instead of on every delegatecall.
+func newFreshness(client *rpc.Client, window uint64) (*chainstate.CachedFreshness, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamVerifyTimeout)
+	defer cancel()
+
+	f := chainstate.NewRPCFreshness(ethclient.NewClient(client), window, freshnessTimeout)
+	if err := f.Verify(ctx); err != nil {
+		return nil, fmt.Errorf("%w (set FRESH_CONTRACT_BLOCKS below the node's state history)", err)
+	}
+	return chainstate.NewCachedFreshness(f, freshnessCacheSize)
 }
 
 // newScreener wires the screening pipeline: sanctions checkers -> rules -> risk engine.
@@ -143,6 +180,7 @@ func newScreener(cfg screenerConfig, log *slog.Logger) (*screen.Screener, error)
 		rules.NewSanctioned(checker),
 		rules.NewPrivilegeChange(),
 		rules.NewDeployAndCall(),
+		rules.NewDelegatecallToFresh(cfg.freshness),
 	)
 	if err != nil {
 		return nil, err

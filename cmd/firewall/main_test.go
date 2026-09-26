@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/spaceh3ad/tx-firewall/internal/rules"
 	"github.com/spaceh3ad/tx-firewall/internal/screen"
 	"github.com/spaceh3ad/tx-firewall/internal/simulate"
@@ -56,17 +57,79 @@ func fakeTraceNode(t *testing.T, result string) string {
 	return srv.URL
 }
 
+func dial(t *testing.T, url string) *rpc.Client {
+	t.Helper()
+	client, err := dialUpstream(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	return client
+}
+
 func TestNewSimulator(t *testing.T) {
 	trace := `{"type":"CALL","from":"0x0000000000000000000000000000000000000000","to":"0x0000000000000000000000000000000000000000","gas":"0x0","gasUsed":"0x0","input":"0x"}`
-	if _, err := newSimulator(fakeTraceNode(t, trace)); err != nil {
+	if _, err := newSimulator(dial(t, fakeTraceNode(t, trace))); err != nil {
 		t.Errorf("node with debug API: unexpected error: %v", err)
 	}
-	if _, err := newSimulator(fakeTraceNode(t, "")); err == nil {
+	if _, err := newSimulator(dial(t, fakeTraceNode(t, ""))); err == nil {
 		t.Error("node without debug API: expected an error")
 	}
-	if _, err := newSimulator(unreachableURL(t)); err == nil {
+	if _, err := newSimulator(dial(t, unreachableURL(t))); err == nil {
 		t.Error("unreachable node: expected an error")
 	}
+}
+
+// fakeHistoryNode is a JSON-RPC server at block 10000 that has pruned state older than oldest.
+func fakeHistoryNode(t *testing.T, oldest uint64) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage   `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		reply := func(body string) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(req.ID) + `,` + body + `}`))
+		}
+		switch req.Method {
+		case "eth_blockNumber":
+			reply(`"result":"0x2710"`)
+		case "eth_getCode":
+			var block hexutil.Uint64
+			if err := json.Unmarshal(req.Params[1], &block); err == nil && uint64(block) < oldest {
+				reply(`"error":{"code":-32000,"message":"missing trie node"}`)
+				return
+			}
+			reply(`"result":"0x"`)
+		default:
+			reply(`"error":{"code":-32601,"message":"method not found"}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestNewFreshness(t *testing.T) {
+	if _, err := newFreshness(dial(t, fakeHistoryNode(t, 0)), 7200); err != nil {
+		t.Errorf("archive node: unexpected error: %v", err)
+	}
+	pruned := fakeHistoryNode(t, 10_000-128)
+	if _, err := newFreshness(dial(t, pruned), 7200); err == nil || !strings.Contains(err.Error(), "FRESH_CONTRACT_BLOCKS") {
+		t.Errorf("pruned node with a long window: err = %v, want one pointing at FRESH_CONTRACT_BLOCKS", err)
+	}
+	if _, err := newFreshness(dial(t, pruned), 100); err != nil {
+		t.Errorf("pruned node with a short window: unexpected error: %v", err)
+	}
+}
+
+// staticFreshness reports the listed contracts as fresh.
+type staticFreshness map[common.Address]bool
+
+func (f staticFreshness) IsFreshContract(_ context.Context, addr common.Address) (bool, error) {
+	return f[addr], nil
 }
 
 func writeFile(t *testing.T, content string) string {
@@ -142,6 +205,7 @@ func TestNewScreenerWithListOnly(t *testing.T) {
 		sanctionsFile: writeFile(t, "# test list\n"+listed.Hex()+"\n"),
 		threshold:     50,
 		simulator:     plainSimulator{},
+		freshness:     staticFreshness{},
 	}, discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -155,6 +219,7 @@ func TestNewScreenerWithOracle(t *testing.T) {
 		oracleRPC:     fakeOracleNode(t, true),
 		threshold:     50,
 		simulator:     plainSimulator{},
+		freshness:     staticFreshness{},
 	}, discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -213,7 +278,7 @@ func TestNewScreenerFlagsPrivilegeChange(t *testing.T) {
 	tx := &txdecode.Decoded{Tx: types.NewTx(&types.DynamicFeeTx{To: &vault}), From: clean}
 
 	for threshold, wantBlock := range map[int]bool{50: false, 40: true} {
-		s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: threshold, simulator: sim}, discard)
+		s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: threshold, simulator: sim, freshness: staticFreshness{}}, discard)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,18 +328,37 @@ func TestNewScreenerCombinesRules(t *testing.T) {
 		},
 	}
 
+	// A proxy whose implementation was just swapped for fresh code, then upgraded again.
+	impl := common.HexToAddress("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+	upgraded := simulate.Log{Address: factory, Topics: []common.Hash{
+		crypto.Keccak256Hash([]byte("Upgraded(address)")),
+		common.BytesToHash(attacker.Bytes()),
+	}}
+	delegateToFresh := &simulate.CallFrame{
+		Type: "CALL", From: clean, To: &factory,
+		Calls: []simulate.CallFrame{{Type: "DELEGATECALL", From: factory, To: &impl}},
+	}
+	freshUpgrade := &simulate.CallFrame{
+		Type: "CALL", From: clean, To: &factory,
+		Calls: []simulate.CallFrame{{Type: "DELEGATECALL", From: factory, To: &impl, Logs: []simulate.Log{upgraded}}},
+	}
+
 	cases := map[string]struct {
 		trace     *simulate.CallFrame
+		fresh     staticFreshness
 		wantScore int
 		wantBlock bool
 	}{
-		"deploy and call alone":     {deployAndCall, rules.WeightMedium, false},
-		"deploy, call and takeover": {takeover, rules.WeightMedium + rules.WeightHigh, true},
+		"deploy and call alone":               {deployAndCall, nil, rules.WeightMedium, false},
+		"deploy, call and takeover":           {takeover, nil, rules.WeightMedium + rules.WeightHigh, true},
+		"delegatecall to established code":    {delegateToFresh, nil, 0, false},
+		"delegatecall to fresh code":          {delegateToFresh, staticFreshness{impl: true}, rules.WeightMedium, false},
+		"fresh implementation upgrades proxy": {freshUpgrade, staticFreshness{impl: true}, rules.WeightMedium + rules.WeightHigh, true},
 	}
 	tx := &txdecode.Decoded{Tx: types.NewTx(&types.DynamicFeeTx{To: &factory}), From: clean}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: 50, simulator: traceSimulator{tc.trace}}, discard)
+			s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: 50, simulator: traceSimulator{tc.trace}, freshness: tc.fresh}, discard)
 			if err != nil {
 				t.Fatal(err)
 			}

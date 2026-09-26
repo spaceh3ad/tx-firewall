@@ -36,11 +36,12 @@ Expected response: `{"jsonrpc":"2.0","id":1,"result":"0x7a69"}`
 
 ## Configuration
 
-| Variable               | Default                  | Description                                                                 |
-|------------------------|--------------------------|-----------------------------------------------------------------------------|
-| `SANCTIONS_LIST`       | `./config/sanctions.txt` | Host path of the sanctions list mounted into the firewall container         |
-| `SANCTIONS_ORACLE_RPC` | empty (disabled)         | Mainnet RPC URL used to query the Chainalysis sanctions oracle              |
-| `RISK_THRESHOLD`       | `50`                     | A transaction is blocked when the summed weights of its findings reach this |
+| Variable                | Default                  | Description                                                                 |
+|-------------------------|--------------------------|-----------------------------------------------------------------------------|
+| `SANCTIONS_LIST`        | `./config/sanctions.txt` | Host path of the sanctions list mounted into the firewall container         |
+| `SANCTIONS_ORACLE_RPC`  | empty (disabled)         | Mainnet RPC URL used to query the Chainalysis sanctions oracle              |
+| `RISK_THRESHOLD`        | `50`                     | A transaction is blocked when the summed weights of its findings reach this |
+| `FRESH_CONTRACT_BLOCKS` | `7200` (about a day)     | A contract deployed within this many blocks counts as fresh                 |
 
 The sanctions list has one address per line; blank lines and anything after `#` are ignored. The firewall refuses to start if the list is missing or has a malformed line. `config/sanctions.txt` is a snapshot of the [OFAC Ethereum address list](https://github.com/0xB10C/ofac-sanctioned-digital-currency-addresses); replace its addresses with the latest version of that file to refresh it.
 
@@ -48,7 +49,9 @@ When `SANCTIONS_ORACLE_RPC` is set, addresses that pass the list are also checke
 
 ## How screening works
 
-Every `eth_sendRawTransaction` is decoded and simulated on the upstream node with `debug_traceCall`, so **the upstream node must expose the debug API** (Anvil does; for Geth enable the `debug` namespace). The firewall checks this at startup. Effects of frames that revert are ignored, since they are rolled back on-chain.
+Every `eth_sendRawTransaction` is decoded and simulated on the upstream node with `debug_traceCall`, so **the upstream node must expose the debug API** (Anvil does; for Geth enable the `debug` namespace; most public RPC providers don't). Effects of frames that revert are ignored, since they are rolled back on-chain.
+
+A contract is **fresh** when it has code now but had none `FRESH_CONTRACT_BLOCKS` blocks ago, so **the upstream node must also keep state that far back**: an archive node or Anvil works with the default; a pruned Geth node keeps 128 blocks, so use at most 127 there. Contracts deployed by the transaction itself are always fresh. The firewall checks both requirements at startup and refuses to start if either is missing.
 
 The rules then inspect the result. A hard-block finding blocks the transaction; otherwise the weights of the findings are summed (high = 40, medium = 20) and the transaction is blocked when the score reaches `RISK_THRESHOLD`. With the default of 50, a single high-weight finding is logged as `flagged transaction` and forwarded, and it takes a second signal to block.
 
@@ -71,7 +74,7 @@ A transaction the node refuses to execute (for example, the sender can't pay for
 | Unlimited approval to fresh contract | Approval with the max amount to a recently deployed contract                                                                   | Medium weight | Planned                     |
 | NFT drainer                          | ApprovalForAll to a fresh contract or EOA                                                                                      | Medium weight | Planned                     |
 | Deploy-and-call                      | The transaction creates a contract and immediately calls it                                                                    | Medium weight | Done                        |
-| Delegatecall to fresh code           | DELEGATECALL into a contract with no history                                                                                   | Medium weight | Planned                     |
+| Delegatecall to fresh code           | DELEGATECALL into a contract with no history                                                                                   | Medium weight | Done                        |
 
 The sanctioned-address rule checks the sender, the recipient, every contract called or created by a frame that doesn't revert (including delegatecall targets), and the recipient of every ERC-20 and ERC-721 `Transfer`.
 
