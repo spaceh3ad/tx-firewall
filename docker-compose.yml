@@ -20,6 +20,7 @@ services:
       SANCTIONS_FILE: /etc/tx-firewall/sanctions.txt
       RISK_THRESHOLD: ${RISK_THRESHOLD:-50}
       FRESH_CONTRACT_BLOCKS: ${FRESH_CONTRACT_BLOCKS:-7200}
+      LARGE_OUTFLOW_PERCENT: ${LARGE_OUTFLOW_PERCENT:-50}
       # Mainnet RPC for the Chainalysis oracle; empty disables it (it isn't deployed on local Anvil)
       SANCTIONS_ORACLE_RPC: ${SANCTIONS_ORACLE_RPC:-}
     volumes:

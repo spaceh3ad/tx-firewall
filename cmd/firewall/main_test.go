@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -126,6 +127,13 @@ func TestNewFreshness(t *testing.T) {
 	}
 }
 
+// staticBalances gives every holder 1000 of every asset.
+type staticBalances struct{}
+
+func (staticBalances) Balance(context.Context, common.Address, common.Address) (*big.Int, bool, error) {
+	return big.NewInt(1000), true, nil
+}
+
 // staticFreshness reports the listed contracts as fresh and every other address as established.
 type staticFreshness map[common.Address]bool
 
@@ -210,10 +218,12 @@ func assertBlocks(t *testing.T, s *screen.Screener, want map[common.Address]bool
 
 func TestNewScreenerWithListOnly(t *testing.T) {
 	s, err := newScreener(screenerConfig{
-		sanctionsFile: writeFile(t, "# test list\n"+listed.Hex()+"\n"),
-		threshold:     50,
-		simulator:     plainSimulator{},
-		freshness:     staticFreshness{},
+		sanctionsFile:  writeFile(t, "# test list\n"+listed.Hex()+"\n"),
+		threshold:      50,
+		outflowPercent: 50,
+		balances:       staticBalances{},
+		simulator:      plainSimulator{},
+		freshness:      staticFreshness{},
 	}, discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -223,11 +233,13 @@ func TestNewScreenerWithListOnly(t *testing.T) {
 
 func TestNewScreenerWithOracle(t *testing.T) {
 	s, err := newScreener(screenerConfig{
-		sanctionsFile: writeFile(t, listed.Hex()+"\n"),
-		oracleRPC:     fakeOracleNode(t, true),
-		threshold:     50,
-		simulator:     plainSimulator{},
-		freshness:     staticFreshness{},
+		sanctionsFile:  writeFile(t, listed.Hex()+"\n"),
+		oracleRPC:      fakeOracleNode(t, true),
+		threshold:      50,
+		outflowPercent: 50,
+		balances:       staticBalances{},
+		simulator:      plainSimulator{},
+		freshness:      staticFreshness{},
 	}, discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -237,12 +249,13 @@ func TestNewScreenerWithOracle(t *testing.T) {
 
 func TestNewScreenerRejectsBadConfig(t *testing.T) {
 	cases := map[string]screenerConfig{
-		"missing file":           {sanctionsFile: filepath.Join(t.TempDir(), "missing.txt"), threshold: 50},
-		"malformed list":         {sanctionsFile: writeFile(t, "not-an-address\n"), threshold: 50},
-		"zero threshold":         {sanctionsFile: writeFile(t, ""), threshold: 0},
-		"oracle not on chain":    {sanctionsFile: writeFile(t, ""), oracleRPC: fakeOracleNode(t, false), threshold: 50},
-		"unsupported rpc url":    {sanctionsFile: writeFile(t, ""), oracleRPC: "ftp://example.com", threshold: 50},
-		"unreachable oracle rpc": {sanctionsFile: writeFile(t, ""), oracleRPC: unreachableURL(t), threshold: 50},
+		"missing file":           {sanctionsFile: filepath.Join(t.TempDir(), "missing.txt"), threshold: 50, outflowPercent: 50},
+		"malformed list":         {sanctionsFile: writeFile(t, "not-an-address\n"), threshold: 50, outflowPercent: 50},
+		"zero threshold":         {sanctionsFile: writeFile(t, ""), threshold: 0, outflowPercent: 50},
+		"zero outflow percent":   {sanctionsFile: writeFile(t, ""), threshold: 50, outflowPercent: 0},
+		"oracle not on chain":    {sanctionsFile: writeFile(t, ""), oracleRPC: fakeOracleNode(t, false), threshold: 50, outflowPercent: 50},
+		"unsupported rpc url":    {sanctionsFile: writeFile(t, ""), oracleRPC: "ftp://example.com", threshold: 50, outflowPercent: 50},
+		"unreachable oracle rpc": {sanctionsFile: writeFile(t, ""), oracleRPC: unreachableURL(t), threshold: 50, outflowPercent: 50},
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -286,7 +299,7 @@ func TestNewScreenerFlagsPrivilegeChange(t *testing.T) {
 	tx := &txdecode.Decoded{Tx: types.NewTx(&types.DynamicFeeTx{To: &vault}), From: clean}
 
 	for threshold, wantBlock := range map[int]bool{50: false, 40: true} {
-		s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: threshold, simulator: sim, freshness: staticFreshness{}}, discard)
+		s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: threshold, outflowPercent: 50, balances: staticBalances{}, simulator: sim, freshness: staticFreshness{}}, discard)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -377,12 +390,36 @@ func TestNewScreenerCombinesRules(t *testing.T) {
 		}, drain.Calls...),
 	}
 
+	// A vault holding 1000 (every balance is 1000 in this test) loses 900.
+	// With a borrowed-and-repaid loan from a lending pool, it's a flash-loan exploit.
+	lendingPool := common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
+	transfer := func(from, to common.Address, amount int64) simulate.Log {
+		return simulate.Log{Address: token, Topics: []common.Hash{
+			crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)")),
+			common.BytesToHash(from.Bytes()), common.BytesToHash(to.Bytes()),
+		}, Data: common.BigToHash(big.NewInt(amount)).Bytes()}
+	}
+	vaultDrain := &simulate.CallFrame{
+		Type: "CALL", From: clean, To: &factory,
+		Calls: []simulate.CallFrame{{Type: "CALL", From: factory, To: &token, Logs: []simulate.Log{transfer(vault, attacker, 900)}}},
+	}
+	flashLoanDrain := &simulate.CallFrame{
+		Type: "CALL", From: clean, To: &factory,
+		Calls: []simulate.CallFrame{{Type: "CALL", From: factory, To: &token, Logs: []simulate.Log{
+			transfer(lendingPool, attacker, 1000), // borrow
+			transfer(vault, attacker, 900),        // drain
+			transfer(attacker, lendingPool, 1000), // repay
+		}}},
+	}
+
 	cases := map[string]struct {
 		trace     *simulate.CallFrame
 		fresh     staticFreshness
 		wantScore int
 		wantBlock bool
 	}{
+		"vault drained":                        {vaultDrain, nil, rules.WeightHigh, false},
+		"vault drained with flash loan":        {flashLoanDrain, nil, 2 * rules.WeightHigh, true},
 		"deploy and call alone":                {deployAndCall, nil, rules.WeightMedium, false},
 		"deploy, call and takeover":            {takeover, nil, rules.WeightMedium + rules.WeightHigh, true},
 		"delegatecall to established code":     {delegateToFresh, nil, 0, false},
@@ -395,7 +432,7 @@ func TestNewScreenerCombinesRules(t *testing.T) {
 	tx := &txdecode.Decoded{Tx: types.NewTx(&types.DynamicFeeTx{To: &factory}), From: clean}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: 50, simulator: traceSimulator{tc.trace}, freshness: tc.fresh}, discard)
+			s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: 50, outflowPercent: 50, balances: staticBalances{}, simulator: traceSimulator{tc.trace}, freshness: tc.fresh}, discard)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -412,7 +449,7 @@ func TestNewScreenerCombinesRules(t *testing.T) {
 
 func TestShippedSanctionsListLoads(t *testing.T) {
 	path := filepath.Join("..", "..", "config", "sanctions.txt")
-	if _, err := newScreener(screenerConfig{sanctionsFile: path, threshold: 50}, discard); err != nil {
+	if _, err := newScreener(screenerConfig{sanctionsFile: path, threshold: 50, outflowPercent: 50}, discard); err != nil {
 		t.Fatalf("config/sanctions.txt does not load: %v", err)
 	}
 	content, err := os.ReadFile(path)

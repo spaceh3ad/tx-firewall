@@ -10,8 +10,7 @@ A JSON-RPC proxy that screens Ethereum transactions before they reach the node, 
 - [x] Risk scoring and blocking (`-32003 transaction rejected`, fail-closed)
 - [x] Sanctions screening of every address in the trace (OFAC list, optional Chainalysis oracle)
 - [x] Transaction simulation (`debug_traceCall` with the call tracer)
-- [x] Privilege-change rule
-- [ ] Remaining trace-based rules (see [Rules](#rules))
+- [x] Trace-based rules (see [Rules](#rules))
 
 ## Requirements
 - docker
@@ -42,6 +41,7 @@ Expected response: `{"jsonrpc":"2.0","id":1,"result":"0x7a69"}`
 | `SANCTIONS_ORACLE_RPC`  | empty (disabled)         | Mainnet RPC URL used to query the Chainalysis sanctions oracle              |
 | `RISK_THRESHOLD`        | `50`                     | A transaction is blocked when the summed weights of its findings reach this |
 | `FRESH_CONTRACT_BLOCKS` | `7200` (about a day)     | A contract deployed within this many blocks counts as fresh                 |
+| `LARGE_OUTFLOW_PERCENT` | `50`                     | A contract losing more than this share of a token or ETH is a large outflow |
 
 The sanctions list has one address per line; blank lines and anything after `#` are ignored. The firewall refuses to start if the list is missing or has a malformed line. `config/sanctions.txt` is a snapshot of the [OFAC Ethereum address list](https://github.com/0xB10C/ofac-sanctioned-digital-currency-addresses); replace its addresses with the latest version of that file to refresh it.
 
@@ -68,9 +68,9 @@ A transaction the node refuses to execute (for example, the sender can't pay for
 | Rule                                 | What it checks                                                                                                                 | Type          | Status                      |
 |--------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|---------------|-----------------------------|
 | Sanctioned address                   | An address from the OFAC list (or the Chainalysis oracle) anywhere in the trace: sender, called contracts, Transfer recipients | Hard block    | Done                        |
-| Large outflow                        | More than X% of a contract's token balance leaves in a single transaction                                                      | High weight   | Planned                     |
+| Large outflow                        | More than X% of a contract's token balance leaves in a single transaction                                                      | High weight   | Done                        |
 | Privilege change                     | OwnershipTransferred, Upgraded, AdminChanged, RoleGranted events                                                               | High weight   | Done                        |
-| Flash loan + outflow                 | A loan borrowed and repaid in the same transaction, combined with a large outflow elsewhere                                    | High weight   | Planned                     |
+| Flash loan + outflow                 | A loan borrowed and repaid in the same transaction, combined with a large outflow elsewhere                                    | High weight   | Done                        |
 | Unlimited approval to fresh contract | Approval with the max amount to a recently deployed contract                                                                   | Medium weight | Done                        |
 | NFT drainer                          | ApprovalForAll to a fresh contract or EOA                                                                                      | Medium weight | Done                        |
 | Deploy-and-call                      | The transaction creates a contract and immediately calls it                                                                    | Medium weight | Done                        |
@@ -83,3 +83,5 @@ Privilege-change events from contracts deployed in the same transaction are igno
 Deploy-and-call only counts calls made after the new contract's constructor returns. Factories that deploy and initialise a contract in one transaction match it too, which is why it is medium weight: on its own it is only logged, but combined with a high-weight finding (for example, the new contract taking ownership of an existing one: 20 + 40 = 60) it blocks.
 
 An approval counts as unlimited from 2^128 upwards, which covers `type(uint256).max` and the other "max" values wallets use while staying far above any real balance. The NFT drainer rule flags `ApprovalForAll` grants to any address without code, since marketplaces are contracts, and to fresh contracts; revocations are ignored.
+
+Large outflow compares each contract's **net** outflow (sent minus received during the transaction) of an ERC-20 token or ETH with its balance before the transaction. Using the net amount keeps flash-loan pools and routers, which send and get funds back, from matching. EOAs are ignored, since people move their own funds, and so are tokens whose `balanceOf` reverts or returns something unexpected. A flash loan is either announced by Aave V3, Balancer V2 or Uniswap V3, or spotted as a token leaving an address and at least as much coming back later. The flash-loan rule fires when a large outflow comes from a contract other than the lender, so an exploit that borrows to drain a vault scores 40 + 40 = 80 and is blocked.

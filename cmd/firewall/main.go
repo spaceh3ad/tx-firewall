@@ -53,6 +53,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	outflowPercent, err := strconv.Atoi(getEnv("LARGE_OUTFLOW_PERCENT", "50"))
+	if err != nil {
+		log.Error("LARGE_OUTFLOW_PERCENT must be an integer", "err", err)
+		os.Exit(1)
+	}
+
 	// One connection to the upstream node serves simulation and history lookups.
 	client, err := dialUpstream(upstreamURL)
 	if err != nil {
@@ -71,11 +77,13 @@ func main() {
 	}
 
 	screener, err := newScreener(screenerConfig{
-		sanctionsFile: sanctionsFile,
-		oracleRPC:     os.Getenv("SANCTIONS_ORACLE_RPC"),
-		threshold:     threshold,
-		simulator:     sim,
-		freshness:     freshness,
+		sanctionsFile:  sanctionsFile,
+		oracleRPC:      os.Getenv("SANCTIONS_ORACLE_RPC"),
+		threshold:      threshold,
+		outflowPercent: outflowPercent,
+		simulator:      sim,
+		freshness:      freshness,
+		balances:       chainstate.NewRPCBalances(ethclient.NewClient(client), balanceTimeout),
 	}, log)
 	if err != nil {
 		log.Error("cannot build screening pipeline", "err", err)
@@ -113,6 +121,7 @@ const (
 	simulateTimeout       = 5 * time.Second
 	freshnessTimeout      = 2 * time.Second
 	freshnessCacheSize    = 100_000
+	balanceTimeout        = 2 * time.Second
 )
 
 // contractAge answers both freshness questions the rules ask; *chainstate.CachedFreshness provides it.
@@ -122,11 +131,13 @@ type contractAge interface {
 }
 
 type screenerConfig struct {
-	sanctionsFile string
-	oracleRPC     string // empty disables the Chainalysis oracle
-	threshold     int
-	simulator     simulate.Simulator
-	freshness     contractAge
+	sanctionsFile  string
+	oracleRPC      string // empty disables the Chainalysis oracle
+	threshold      int
+	outflowPercent int
+	simulator      simulate.Simulator
+	freshness      contractAge
+	balances       chainstate.BalanceReader
 }
 
 func dialUpstream(rpcURL string) (*rpc.Client, error) {
@@ -182,6 +193,11 @@ func newScreener(cfg screenerConfig, log *slog.Logger) (*screen.Screener, error)
 		log.Warn("sanctions list is empty and the oracle is disabled, no address will be blocked")
 	}
 
+	outflows, err := rules.NewOutflowDetector(cfg.freshness, cfg.balances, cfg.outflowPercent)
+	if err != nil {
+		return nil, err
+	}
+
 	engine, err := risk.NewEngine(cfg.threshold,
 		rules.NewSanctioned(checker),
 		rules.NewPrivilegeChange(),
@@ -189,6 +205,8 @@ func newScreener(cfg screenerConfig, log *slog.Logger) (*screen.Screener, error)
 		rules.NewDelegatecallToFresh(cfg.freshness),
 		rules.NewUnlimitedApproval(cfg.freshness),
 		rules.NewNFTDrainer(cfg.freshness),
+		rules.NewLargeOutflow(outflows),
+		rules.NewFlashLoanOutflow(outflows),
 	)
 	if err != nil {
 		return nil, err
