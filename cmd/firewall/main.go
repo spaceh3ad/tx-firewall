@@ -115,12 +115,18 @@ const (
 	freshnessCacheSize    = 100_000
 )
 
+// contractAge answers both freshness questions the rules ask; *chainstate.CachedFreshness provides it.
+type contractAge interface {
+	chainstate.FreshnessChecker
+	chainstate.StatusReader
+}
+
 type screenerConfig struct {
 	sanctionsFile string
 	oracleRPC     string // empty disables the Chainalysis oracle
 	threshold     int
 	simulator     simulate.Simulator
-	freshness     chainstate.FreshnessChecker
+	freshness     contractAge
 }
 
 func dialUpstream(rpcURL string) (*rpc.Client, error) {
@@ -181,6 +187,8 @@ func newScreener(cfg screenerConfig, log *slog.Logger) (*screen.Screener, error)
 		rules.NewPrivilegeChange(),
 		rules.NewDeployAndCall(),
 		rules.NewDelegatecallToFresh(cfg.freshness),
+		rules.NewUnlimitedApproval(cfg.freshness),
+		rules.NewNFTDrainer(cfg.freshness),
 	)
 	if err != nil {
 		return nil, err

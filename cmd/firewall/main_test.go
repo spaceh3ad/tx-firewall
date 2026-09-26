@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/spaceh3ad/tx-firewall/internal/chainstate"
 	"github.com/spaceh3ad/tx-firewall/internal/rules"
 	"github.com/spaceh3ad/tx-firewall/internal/screen"
 	"github.com/spaceh3ad/tx-firewall/internal/simulate"
@@ -125,11 +126,18 @@ func TestNewFreshness(t *testing.T) {
 	}
 }
 
-// staticFreshness reports the listed contracts as fresh.
+// staticFreshness reports the listed contracts as fresh and every other address as established.
 type staticFreshness map[common.Address]bool
 
 func (f staticFreshness) IsFreshContract(_ context.Context, addr common.Address) (bool, error) {
 	return f[addr], nil
+}
+
+func (f staticFreshness) Status(_ context.Context, addr common.Address) (chainstate.Status, error) {
+	if f[addr] {
+		return chainstate.Fresh, nil
+	}
+	return chainstate.Established, nil
 }
 
 func writeFile(t *testing.T, content string) string {
@@ -343,17 +351,46 @@ func TestNewScreenerCombinesRules(t *testing.T) {
 		Calls: []simulate.CallFrame{{Type: "DELEGATECALL", From: factory, To: &impl, Logs: []simulate.Log{upgraded}}},
 	}
 
+	// A wallet drainer: the victim approves a fresh contract for all tokens and NFTs.
+	token := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	nft := common.HexToAddress("0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D")
+	owner, spender := common.BytesToHash(clean.Bytes()), common.BytesToHash(attacker.Bytes())
+	unlimited := simulate.Log{Address: token, Topics: []common.Hash{
+		crypto.Keccak256Hash([]byte("Approval(address,address,uint256)")), owner, spender,
+	}, Data: common.MaxHash.Bytes()}
+	allNFTs := simulate.Log{Address: nft, Topics: []common.Hash{
+		crypto.Keccak256Hash([]byte("ApprovalForAll(address,address,bool)")), owner, spender,
+	}, Data: common.BigToHash(common.Big1).Bytes()}
+	drain := &simulate.CallFrame{
+		Type: "CALL", From: clean, To: &factory,
+		Calls: []simulate.CallFrame{
+			{Type: "CALL", From: factory, To: &token, Logs: []simulate.Log{unlimited}},
+			{Type: "CALL", From: factory, To: &nft, Logs: []simulate.Log{allNFTs}},
+		},
+	}
+	// The same approvals given to a contract deployed and called in the transaction.
+	deployAndDrain := &simulate.CallFrame{
+		Type: "CALL", From: clean, To: &factory,
+		Calls: append([]simulate.CallFrame{
+			{Type: "CREATE", From: factory, To: &attacker},
+			{Type: "CALL", From: factory, To: &attacker},
+		}, drain.Calls...),
+	}
+
 	cases := map[string]struct {
 		trace     *simulate.CallFrame
 		fresh     staticFreshness
 		wantScore int
 		wantBlock bool
 	}{
-		"deploy and call alone":               {deployAndCall, nil, rules.WeightMedium, false},
-		"deploy, call and takeover":           {takeover, nil, rules.WeightMedium + rules.WeightHigh, true},
-		"delegatecall to established code":    {delegateToFresh, nil, 0, false},
-		"delegatecall to fresh code":          {delegateToFresh, staticFreshness{impl: true}, rules.WeightMedium, false},
-		"fresh implementation upgrades proxy": {freshUpgrade, staticFreshness{impl: true}, rules.WeightMedium + rules.WeightHigh, true},
+		"deploy and call alone":                {deployAndCall, nil, rules.WeightMedium, false},
+		"deploy, call and takeover":            {takeover, nil, rules.WeightMedium + rules.WeightHigh, true},
+		"delegatecall to established code":     {delegateToFresh, nil, 0, false},
+		"delegatecall to fresh code":           {delegateToFresh, staticFreshness{impl: true}, rules.WeightMedium, false},
+		"fresh implementation upgrades proxy":  {freshUpgrade, staticFreshness{impl: true}, rules.WeightMedium + rules.WeightHigh, true},
+		"approvals to established contract":    {drain, nil, 0, false},
+		"approvals to fresh contract":          {drain, staticFreshness{attacker: true}, 2 * rules.WeightMedium, false},
+		"approvals to contract deployed in tx": {deployAndDrain, nil, 3 * rules.WeightMedium, true},
 	}
 	tx := &txdecode.Decoded{Tx: types.NewTx(&types.DynamicFeeTx{To: &factory}), From: clean}
 	for name, tc := range cases {
