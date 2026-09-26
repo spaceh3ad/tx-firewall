@@ -36,7 +36,8 @@ type Analysis struct {
 	ApprovalsForAll []events.ApprovalForAll
 	Privileged      []events.PrivilegeChange
 
-	Flows []Flow // ERC-20 and ETH sent and received per holder
+	Flows      []Flow      // ERC-20 and ETH sent and received per holder
+	FlashLoans []FlashLoan // loans borrowed and repaid within the transaction
 }
 
 // Frame is one call of the trace. The root frame has depth 0; a frame's
@@ -91,6 +92,7 @@ func Build(tx *txdecode.Decoded, trace *simulate.CallFrame) *Analysis {
 	a.Reverted = trace.Error != ""
 	a.collect(trace, 0)
 	a.Flows = computeFlows(a.Frames, a.Transfers)
+	a.FlashLoans = mergeFlashLoans(a.FlashLoans, findRepaidLoans(a.Transfers))
 	return a
 }
 
@@ -125,6 +127,9 @@ func (a *Analysis) collect(f *simulate.CallFrame, depth int) {
 		}
 		if pc, ok := events.DecodePrivilegeChange(l.Address, l.Topics, l.Data); ok {
 			a.Privileged = append(a.Privileged, pc)
+		}
+		if fl, ok := events.DecodeFlashLoan(l.Address, l.Topics, l.Data); ok {
+			a.FlashLoans = append(a.FlashLoans, FlashLoan{Lender: fl.Lender, Token: fl.Token, Amount: fl.Amount, Source: fl.Protocol})
 		}
 	}
 	for i := range f.Calls {
