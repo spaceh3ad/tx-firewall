@@ -142,6 +142,7 @@ func newScreener(cfg screenerConfig, log *slog.Logger) (*screen.Screener, error)
 	engine, err := risk.NewEngine(cfg.threshold,
 		rules.NewSanctioned(checker),
 		rules.NewPrivilegeChange(),
+		rules.NewDeployAndCall(),
 	)
 	if err != nil {
 		return nil, err

@@ -70,9 +70,11 @@ A transaction the node refuses to execute (for example, the sender can't pay for
 | Flash loan + outflow                 | A loan borrowed and repaid in the same transaction, combined with a large outflow elsewhere                                    | High weight   | Planned                     |
 | Unlimited approval to fresh contract | Approval with the max amount to a recently deployed contract                                                                   | Medium weight | Planned                     |
 | NFT drainer                          | ApprovalForAll to a fresh contract or EOA                                                                                      | Medium weight | Planned                     |
-| Deploy-and-call                      | The transaction creates a contract and immediately calls it                                                                    | Medium weight | Planned                     |
+| Deploy-and-call                      | The transaction creates a contract and immediately calls it                                                                    | Medium weight | Done                        |
 | Delegatecall to fresh code           | DELEGATECALL into a contract with no history                                                                                   | Medium weight | Planned                     |
 
 The sanctioned-address rule checks the sender, the recipient, every contract called or created by a frame that doesn't revert (including delegatecall targets), and the recipient of every ERC-20 and ERC-721 `Transfer`.
 
 Privilege-change events from contracts deployed in the same transaction are ignored: constructors emit them when setting the initial owner, implementation or roles.
+
+Deploy-and-call only counts calls made after the new contract's constructor returns. Factories that deploy and initialise a contract in one transaction match it too, which is why it is medium weight: on its own it is only logged, but combined with a high-weight finding (for example, the new contract taking ownership of an existing one: 20 + 40 = 60) it blocks.

@@ -227,6 +227,68 @@ func TestNewScreenerFlagsPrivilegeChange(t *testing.T) {
 	}
 }
 
+// traceSimulator returns the same trace for every transaction.
+type traceSimulator struct{ trace *simulate.CallFrame }
+
+func (s traceSimulator) Simulate(context.Context, *txdecode.Decoded) (*simulate.CallFrame, error) {
+	return s.trace, nil
+}
+
+// Signals add up: deploying and calling a contract (medium) that takes over
+// an existing contract (high) reaches the default threshold of 50.
+func TestNewScreenerCombinesRules(t *testing.T) {
+	factory := common.HexToAddress("0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9")
+	attacker := common.HexToAddress("0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9")
+	vault := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+	ownershipTransferred := simulate.Log{Address: vault, Topics: []common.Hash{
+		crypto.Keccak256Hash([]byte("OwnershipTransferred(address,address)")),
+		common.BytesToHash(factory.Bytes()),
+		common.BytesToHash(attacker.Bytes()),
+	}}
+
+	deployAndCall := &simulate.CallFrame{
+		Type: "CALL", From: clean, To: &factory,
+		Calls: []simulate.CallFrame{
+			{Type: "CREATE", From: factory, To: &attacker},
+			{Type: "CALL", From: factory, To: &attacker},
+		},
+	}
+	takeover := &simulate.CallFrame{
+		Type: "CALL", From: clean, To: &factory,
+		Calls: []simulate.CallFrame{
+			{Type: "CREATE", From: factory, To: &attacker},
+			{Type: "CALL", From: factory, To: &attacker, Calls: []simulate.CallFrame{
+				{Type: "CALL", From: attacker, To: &vault, Logs: []simulate.Log{ownershipTransferred}},
+			}},
+		},
+	}
+
+	cases := map[string]struct {
+		trace     *simulate.CallFrame
+		wantScore int
+		wantBlock bool
+	}{
+		"deploy and call alone":     {deployAndCall, rules.WeightMedium, false},
+		"deploy, call and takeover": {takeover, rules.WeightMedium + rules.WeightHigh, true},
+	}
+	tx := &txdecode.Decoded{Tx: types.NewTx(&types.DynamicFeeTx{To: &factory}), From: clean}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, err := newScreener(screenerConfig{sanctionsFile: writeFile(t, ""), threshold: 50, simulator: traceSimulator{tc.trace}}, discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v, err := s.Screen(t.Context(), tx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v.Score != tc.wantScore || v.Block != tc.wantBlock {
+				t.Errorf("verdict = %+v, want score %d and block %v", v, tc.wantScore, tc.wantBlock)
+			}
+		})
+	}
+}
+
 func TestShippedSanctionsListLoads(t *testing.T) {
 	path := filepath.Join("..", "..", "config", "sanctions.txt")
 	if _, err := newScreener(screenerConfig{sanctionsFile: path, threshold: 50}, discard); err != nil {
