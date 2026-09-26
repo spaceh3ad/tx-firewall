@@ -3,6 +3,7 @@
 package analysis
 
 import (
+	"math/big"
 	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -34,6 +35,8 @@ type Analysis struct {
 	Approvals       []events.Approval
 	ApprovalsForAll []events.ApprovalForAll
 	Privileged      []events.PrivilegeChange
+
+	Flows []Flow // ERC-20 and ETH sent and received per holder
 }
 
 // Frame is one call of the trace. The root frame has depth 0; a frame's
@@ -42,6 +45,7 @@ type Frame struct {
 	Type  string         // CALL, STATICCALL, DELEGATECALL, CALLCODE, CREATE, CREATE2, SELFDESTRUCT
 	From  common.Address // the caller, or the proxy's address for a DELEGATECALL
 	To    common.Address // the callee, or the new contract for CREATE and CREATE2
+	Value *big.Int       // ETH attached to the frame; nil when none
 	Depth int
 }
 
@@ -86,6 +90,7 @@ func Build(tx *txdecode.Decoded, trace *simulate.CallFrame) *Analysis {
 	}
 	a.Reverted = trace.Error != ""
 	a.collect(trace, 0)
+	a.Flows = computeFlows(a.Frames, a.Transfers)
 	return a
 }
 
@@ -95,6 +100,9 @@ func (a *Analysis) collect(f *simulate.CallFrame, depth int) {
 		return
 	}
 	frame := Frame{Type: f.Type, From: f.From, Depth: depth}
+	if f.Value != nil && f.Value.ToInt().Sign() > 0 {
+		frame.Value = new(big.Int).Set(f.Value.ToInt())
+	}
 	if f.To != nil {
 		frame.To = *f.To
 		a.addAddress(*f.To)
