@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -101,6 +102,37 @@ func TestBuildRevertedTransaction(t *testing.T) {
 	}
 }
 
+func TestBuildCollectsTouchedAddresses(t *testing.T) {
+	token := common.HexToAddress("0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9")
+	lib := common.HexToAddress("0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9")
+	unreachable := common.HexToAddress("0x5FC8d32690cc91D4c39d9d3abcBD16989F875707")
+	recipient := common.HexToAddress("0x976EA74026E726554dB657fA54763abd0C3a0aa9")
+	transfer := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
+
+	trace := &simulate.CallFrame{
+		Type: "CALL", From: alice, To: addrPtr(proxy),
+		Calls: []simulate.CallFrame{
+			{Type: "DELEGATECALL", From: proxy, To: addrPtr(lib)},
+			{Type: "CALL", From: proxy, To: addrPtr(token), Logs: []simulate.Log{{
+				Address: token,
+				Topics:  []common.Hash{transfer, common.BytesToHash(proxy.Bytes()), common.BytesToHash(recipient.Bytes())},
+				Data:    common.BigToHash(common.Big1).Bytes(),
+			}}},
+			{Type: "CALL", From: proxy, To: addrPtr(unreachable), Error: "execution reverted"},
+			{Type: "STATICCALL", From: proxy, To: addrPtr(lib)}, // already listed
+		},
+	}
+	a := Build(decoded(alice, &proxy), trace)
+
+	want := []common.Address{alice, proxy, lib, token, recipient}
+	if !slices.Equal(a.Addresses, want) {
+		t.Errorf("addresses = %v, want %v", a.Addresses, want)
+	}
+	if len(a.Transfers) != 1 || a.Transfers[0].To != recipient || a.Transfers[0].Token != token {
+		t.Errorf("transfers = %+v", a.Transfers)
+	}
+}
+
 func TestBuildCreatedContracts(t *testing.T) {
 	trace := &simulate.CallFrame{
 		Type: "CREATE", From: alice, To: addrPtr(proxy),
@@ -150,8 +182,8 @@ func treeFrom(data []byte, pos *int, depth int) simulate.CallFrame {
 	return f
 }
 
-// Model check: Build keeps exactly the logs and creations of frames with no
-// reverted ancestor (including themselves), and none from anywhere else.
+// Model check: Build keeps exactly the logs, creations and addresses of frames
+// with no reverted ancestor (including themselves), and none from anywhere else.
 func FuzzBuildSkipsReverted(f *testing.F) {
 	f.Add([]byte{0x02})
 	f.Add([]byte{0x34, 0x03, 0x0a})
@@ -163,6 +195,7 @@ func FuzzBuildSkipsReverted(f *testing.F) {
 		root := treeFrom(data, &pos, 0)
 
 		wantLogs, wantCreated := 0, 0
+		wantAddrs := map[common.Address]bool{alice: true, bob: true}
 		var count func(f *simulate.CallFrame, revertedAbove bool)
 		count = func(f *simulate.CallFrame, revertedAbove bool) {
 			reverted := revertedAbove || f.Error != ""
@@ -171,6 +204,7 @@ func FuzzBuildSkipsReverted(f *testing.F) {
 				if f.Type == "CREATE" {
 					wantCreated++
 				}
+				wantAddrs[*f.To] = true
 			}
 			for i := range f.Calls {
 				count(&f.Calls[i], reverted)
@@ -184,6 +218,14 @@ func FuzzBuildSkipsReverted(f *testing.F) {
 		}
 		if a.Reverted != (root.Error != "") {
 			t.Fatalf("reverted = %v, root error %q", a.Reverted, root.Error)
+		}
+		if len(a.Addresses) != len(wantAddrs) {
+			t.Fatalf("addresses = %v, want the %d distinct addresses %v", a.Addresses, len(wantAddrs), wantAddrs)
+		}
+		for _, addr := range a.Addresses {
+			if !wantAddrs[addr] {
+				t.Fatalf("address %s is not touched by a successful frame", addr)
+			}
 		}
 	})
 }

@@ -15,9 +15,10 @@ import (
 type Analysis struct {
 	Tx *txdecode.Decoded
 
-	// Addresses lists every address the transaction touches, without duplicates.
-	// For now this is the sender and, unless the transaction deploys a
-	// contract, the recipient.
+	// Addresses lists every address the transaction touches, without duplicates:
+	// the sender, the recipient, and after simulation also every called or
+	// created contract (including delegatecall targets) and every token
+	// Transfer recipient.
 	Addresses []common.Address
 
 	// The fields below come from simulation and are empty without it.
@@ -28,6 +29,7 @@ type Analysis struct {
 	Created  []common.Address // contracts deployed by this transaction
 	Logs     []simulate.Log   // events that would be emitted, grouped by frame
 
+	Transfers  []events.Transfer
 	Privileged []events.PrivilegeChange
 }
 
@@ -56,17 +58,32 @@ func (a *Analysis) collect(f *simulate.CallFrame) {
 	if f.Error != "" {
 		return
 	}
-	if (f.Type == "CREATE" || f.Type == "CREATE2") && f.To != nil {
-		a.Created = append(a.Created, *f.To)
+	if f.To != nil {
+		a.addAddress(*f.To)
+		if f.Type == "CREATE" || f.Type == "CREATE2" {
+			a.Created = append(a.Created, *f.To)
+		}
 	}
 	for _, l := range f.Logs {
 		a.Logs = append(a.Logs, l)
+		if tr, ok := events.DecodeTransfer(l.Address, l.Topics, l.Data); ok {
+			a.Transfers = append(a.Transfers, tr)
+			a.addAddress(tr.To)
+		}
 		if pc, ok := events.DecodePrivilegeChange(l.Address, l.Topics, l.Data); ok {
 			a.Privileged = append(a.Privileged, pc)
 		}
 	}
 	for i := range f.Calls {
 		a.collect(&f.Calls[i])
+	}
+}
+
+// addAddress appends addr unless it is already listed. A transaction touches
+// at most a few dozen addresses, so a linear scan is cheaper than a set.
+func (a *Analysis) addAddress(addr common.Address) {
+	if !slices.Contains(a.Addresses, addr) {
+		a.Addresses = append(a.Addresses, addr)
 	}
 }
 
