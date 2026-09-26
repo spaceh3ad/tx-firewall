@@ -285,10 +285,20 @@ func FuzzFreshness(f *testing.F) {
 			t.Fatalf("fresh = %v, want %v (latest %d, deployed %d, window %d)", got, want, latest, deployedAt, window)
 		}
 
+		wantStatus := NoCode
+		switch {
+		case want:
+			wantStatus = Fresh
+		case hasCode:
+			wantStatus = Established
+		}
 		cached, _ := NewCachedFreshness(rpc, 4)
 		for range 2 {
 			if got, err := cached.IsFreshContract(t.Context(), contract); err != nil || got != want {
 				t.Fatalf("cached fresh = %v, %v, want %v", got, err, want)
+			}
+			if got, err := cached.Status(t.Context(), contract); err != nil || got != wantStatus {
+				t.Fatalf("cached status = %d, %v, want %d", got, err, wantStatus)
 			}
 		}
 	})

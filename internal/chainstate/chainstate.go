@@ -127,7 +127,10 @@ type CachedFreshness struct {
 	known map[common.Address]struct{}
 }
 
-var _ FreshnessChecker = (*CachedFreshness)(nil)
+var (
+	_ FreshnessChecker = (*CachedFreshness)(nil)
+	_ StatusReader     = (*CachedFreshness)(nil)
+)
 
 func NewCachedFreshness(next StatusReader, maxEntries int) (*CachedFreshness, error) {
 	if maxEntries <= 0 {
@@ -136,17 +139,17 @@ func NewCachedFreshness(next StatusReader, maxEntries int) (*CachedFreshness, er
 	return &CachedFreshness{next: next, maxEntries: maxEntries, known: make(map[common.Address]struct{})}, nil
 }
 
-func (c *CachedFreshness) IsFreshContract(ctx context.Context, addr common.Address) (bool, error) {
+func (c *CachedFreshness) Status(ctx context.Context, addr common.Address) (Status, error) {
 	c.mu.Lock()
 	_, established := c.known[addr]
 	c.mu.Unlock()
 	if established {
-		return false, nil
+		return Established, nil
 	}
 
 	s, err := c.next.Status(ctx, addr)
 	if err != nil || s != Established {
-		return s == Fresh, err
+		return s, err
 	}
 
 	c.mu.Lock()
@@ -155,5 +158,10 @@ func (c *CachedFreshness) IsFreshContract(ctx context.Context, addr common.Addre
 		clear(c.known) // bounded memory without tracking access order
 	}
 	c.known[addr] = struct{}{}
-	return false, nil
+	return Established, nil
+}
+
+func (c *CachedFreshness) IsFreshContract(ctx context.Context, addr common.Address) (bool, error) {
+	s, err := c.Status(ctx, addr)
+	return s == Fresh, err
 }
