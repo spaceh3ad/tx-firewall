@@ -133,6 +133,47 @@ func TestBuildCollectsTouchedAddresses(t *testing.T) {
 	}
 }
 
+func TestBuildFrames(t *testing.T) {
+	// root CALL
+	//   CREATE newImpl
+	//     CALL carol        (from the constructor)
+	//   CALL carol          (reverted: dropped with its child)
+	//     CALL bob
+	//   DELEGATECALL newImpl
+	trace := &simulate.CallFrame{
+		Type: "CALL", From: alice, To: addrPtr(proxy),
+		Calls: []simulate.CallFrame{
+			{Type: "CREATE", From: proxy, To: addrPtr(newImpl), Calls: []simulate.CallFrame{
+				{Type: "CALL", From: newImpl, To: addrPtr(carol)},
+			}},
+			{Type: "CALL", From: proxy, To: addrPtr(carol), Error: "execution reverted", Calls: []simulate.CallFrame{
+				{Type: "CALL", From: carol, To: addrPtr(bob)},
+			}},
+			{Type: "DELEGATECALL", From: proxy, To: addrPtr(newImpl)},
+		},
+	}
+	a := Build(decoded(alice, &proxy), trace)
+
+	want := []Frame{
+		{Type: "CALL", From: alice, To: proxy, Depth: 0},
+		{Type: "CREATE", From: proxy, To: newImpl, Depth: 1},
+		{Type: "CALL", From: newImpl, To: carol, Depth: 2},
+		{Type: "DELEGATECALL", From: proxy, To: newImpl, Depth: 1},
+	}
+	if !slices.Equal(a.Frames, want) {
+		t.Fatalf("frames = %+v\nwant     %+v", a.Frames, want)
+	}
+
+	for i, wantEnd := range []int{4, 3, 3, 4} {
+		if got := a.SubtreeEnd(i); got != wantEnd {
+			t.Errorf("SubtreeEnd(%d) = %d, want %d", i, got, wantEnd)
+		}
+	}
+	if !a.Frames[1].IsCreate() || a.Frames[1].IsCall() || !a.Frames[3].IsCall() {
+		t.Error("IsCreate/IsCall disagree with the frame types")
+	}
+}
+
 func TestBuildCreatedContracts(t *testing.T) {
 	trace := &simulate.CallFrame{
 		Type: "CREATE", From: alice, To: addrPtr(proxy),
@@ -194,12 +235,13 @@ func FuzzBuildSkipsReverted(f *testing.F) {
 		pos := 0
 		root := treeFrom(data, &pos, 0)
 
-		wantLogs, wantCreated := 0, 0
+		wantLogs, wantCreated, wantFrames := 0, 0, 0
 		wantAddrs := map[common.Address]bool{alice: true, bob: true}
 		var count func(f *simulate.CallFrame, revertedAbove bool)
 		count = func(f *simulate.CallFrame, revertedAbove bool) {
 			reverted := revertedAbove || f.Error != ""
 			if !reverted {
+				wantFrames++
 				wantLogs += len(f.Logs)
 				if f.Type == "CREATE" {
 					wantCreated++
@@ -225,6 +267,27 @@ func FuzzBuildSkipsReverted(f *testing.F) {
 		for _, addr := range a.Addresses {
 			if !wantAddrs[addr] {
 				t.Fatalf("address %s is not touched by a successful frame", addr)
+			}
+		}
+
+		// Frames is a pre-order walk: it starts at depth 0, each frame is at
+		// most one level below the previous one, and SubtreeEnd covers
+		// exactly the deeper frames that follow.
+		if len(a.Frames) != wantFrames {
+			t.Fatalf("got %d frames, want %d", len(a.Frames), wantFrames)
+		}
+		for i, fr := range a.Frames {
+			if i == 0 && fr.Depth != 0 || i > 0 && fr.Depth > a.Frames[i-1].Depth+1 {
+				t.Fatalf("frame %d has depth %d after depth %d", i, fr.Depth, a.Frames[max(i-1, 0)].Depth)
+			}
+			end := a.SubtreeEnd(i)
+			for j := i + 1; j < end; j++ {
+				if a.Frames[j].Depth <= fr.Depth {
+					t.Fatalf("SubtreeEnd(%d)=%d includes frame %d at depth %d", i, end, j, a.Frames[j].Depth)
+				}
+			}
+			if end < len(a.Frames) && a.Frames[end].Depth > fr.Depth {
+				t.Fatalf("SubtreeEnd(%d)=%d stops before descendant %d", i, end, end)
 			}
 		}
 	})
