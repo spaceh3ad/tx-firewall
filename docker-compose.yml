@@ -17,6 +17,8 @@ services:
     environment:
       UPSTREAM_URL: ${UPSTREAM_URL:-http://anvil:8545}
       LISTEN_ADDR: ":8546"
+      LOG_FORMAT: ${LOG_FORMAT:-pretty}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
       SANCTIONS_FILE: /etc/tx-firewall/sanctions.txt
       RISK_THRESHOLD: ${RISK_THRESHOLD:-50}
       FRESH_CONTRACT_BLOCKS: ${FRESH_CONTRACT_BLOCKS:-7200}
