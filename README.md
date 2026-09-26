@@ -33,6 +33,20 @@ curl -X POST localhost:8546 -H 'Content-Type: application/json' \
 
 Expected response: `{"jsonrpc":"2.0","id":1,"result":"0x7a69"}`
 
+## Testing
+
+```sh
+go test -race ./...                                              # unit tests
+go test -run '^$' -fuzz FuzzEvaluateInvariants ./internal/risk/   # fuzz one target (any Fuzz* function)
+
+anvil &                                                          # integration tests against a real node
+SIMULATE_RPC=http://127.0.0.1:8545 CHAINSTATE_RPC=http://127.0.0.1:8545 \
+  go test -tags=integration ./internal/...
+SANCTIONS_ORACLE_RPC=<mainnet RPC> go test -tags=integration ./internal/sanctions/   # Chainalysis oracle
+```
+
+CI (`.github/workflows/test.yml`) runs the unit tests, the Anvil integration tests and a Docker build on every push to `main` and every pull request.
+
 ## Configuration
 
 | Variable                | Default                  | Description                                                                 |

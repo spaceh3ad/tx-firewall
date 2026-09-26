@@ -1,0 +1,63 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Run gofmt on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      # Anvil runs in the same step so it lives for the whole test run.
+      # The oracle test skips itself: it needs a mainnet RPC (SANCTIONS_ORACLE_RPC).
+      - name: Integration tests against Anvil
+        env:
+          SIMULATE_RPC: http://127.0.0.1:8545
+          CHAINSTATE_RPC: http://127.0.0.1:8545
+        run: |
+          anvil --port 8545 --silent &
+          for i in $(seq 1 30); do
+            cast chain-id --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1 && break
+            sleep 1
+          done
+          go test -tags=integration -run 'TestSimulateAnvil|TestFreshnessAnvil' -v ./internal/...
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build image
+        run: docker build -t tx-firewall .
